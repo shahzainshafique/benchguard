@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "createdAt": "2026-09-19T19:23:58.646Z",
+  "benchmarks": {
+    "enrichOrders — 5k orders × 1k customers": {
+      "median": 193608.3333333333,
+      "mean": 210952.16666666672,
+      "min": 173200,
+      "stddev": 42990.83022317084,
+      "moe": 5958.22508561016,
+      "rme": 2.824443654577377,
+      "samples": 200,
+      "batch": 6
+    }
+  }
+}
