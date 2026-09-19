@@ -1,6 +1,6 @@
 {
   "name": "benchguard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Catch performance regressions in CI. Run benchmarks, save a baseline, fail when your code gets slower — without flaking on measurement noise.",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,7 +11,9 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "sideEffects": false,
   "author": "Shahzain Shafique",
   "repository": {
