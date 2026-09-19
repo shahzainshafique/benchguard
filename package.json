@@ -1,0 +1,47 @@
+{
+  "name": "benchguard",
+  "version": "0.1.0",
+  "description": "Catch performance regressions in CI. Run benchmarks, save a baseline, fail when your code gets slower — without flaking on measurement noise.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "sideEffects": false,
+  "author": "Shahzain Shafique",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shahzainshafique/benchguard.git"
+  },
+  "homepage": "https://github.com/shahzainshafique/benchguard#readme",
+  "bugs": {
+    "url": "https://github.com/shahzainshafique/benchguard/issues"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "tsx src/index.test.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "benchmark",
+    "performance",
+    "regression",
+    "ci",
+    "perf",
+    "microbenchmark"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
