@@ -1,12 +1,12 @@
 /**
  * Domain logic for a `GET /orders` endpoint: take the raw orders and customers
  * (say, two queries you already ran) and stitch them into the response objects
- * the API returns — customer name, tier, and each order's total.
+ * the API returns: customer name, tier, and each order's total.
  *
  * This is the kind of hot path that runs on every request. It's also exactly
  * where an innocent-looking change turns O(n) into O(n²): swap the Map lookup
- * below for `customers.find(...)` and the OUTPUT stays identical — every test
- * still passes — but latency explodes as your customer table grows. That is the
+ * below for `customers.find(...)` and the OUTPUT stays identical. Every test
+ * still passes, but latency explodes as your customer table grows. That is the
  * regression benchguard is built to catch.
  */
 

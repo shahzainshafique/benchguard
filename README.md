@@ -44,21 +44,19 @@ Build goes red. Same as a failing test. You find out in the PR, not from a
 You already write tests like *"does `placeOrder()` return the right total?"*
 That's a yes or no question about correctness.
 
-benchguard answers a different question: *"is `placeOrder()` still as fast as it
-was last week?"* It's measured in real microseconds, not guesswork.
+benchguard answers a different question: *"is `placeOrder()` still as fast as
+before my change?"* It's measured in real microseconds, not guesswork.
 
-You record how fast your code is today and commit that number. After that, every
-PR gets measured against it. If someone makes it meaningfully slower, the build
-fails.
+It times your code before a change and after it. If the change made it
+meaningfully slower, the build fails.
 
 ```mermaid
 flowchart LR
-    A[Write a benchmark<br/>for a hot function] --> B[Record how fast<br/>it is today]
-    B --> C[Commit that<br/>number to git]
-    C --> D[Every PR gets<br/>measured against it]
-    D --> E{Slower?}
-    E -->|"no, or just noise"| F([build passes])
-    E -->|"yes, really slower"| G([build fails])
+    A[Write a benchmark<br/>for a hot function] --> B[Measure it<br/>before the change]
+    B --> C[Measure it<br/>after the change]
+    C --> D{Slower?}
+    D -->|"no, or just noise"| F([build passes])
+    D -->|"yes, really slower"| G([build fails])
 ```
 
 Think of the recorded number like a snapshot test. A snapshot test saves what
@@ -91,10 +89,10 @@ bench("enrichOrders", () => enrichOrders(orders, customers));
 await run({ threshold: 0.15 }); // fail if it gets 15% slower
 ```
 
-**Step 2.** Record the baseline once, and commit the file it writes.
+**Step 2.** Record how fast it is right now.
 
 ```bash
-npx tsx bench/orders.bench.ts --update
+node bench/orders.bench.ts --update
 ```
 
 ```
@@ -102,15 +100,19 @@ measuring enrichOrders ... 198.38 µs/op  ±2.5%
 Baseline written to benchguard.baseline.json (1 benchmarks)
 ```
 
-**Step 3.** Run it without the flag to check against that baseline. This is the
-command CI runs.
+**Step 3.** Change some code, then run it again without the flag. It compares
+against what you just recorded.
 
 ```bash
-npx tsx bench/orders.bench.ts
+node bench/orders.bench.ts
 ```
 
 It exits with code 1 if the code got slower, so any CI provider fails the job on
 its own. No plugin, no reporter, no config file.
+
+Yes, that's plain `node` running a `.ts` file. Node 22.18+ runs TypeScript
+directly, no build step. On an older Node, use `npx tsx bench/orders.bench.ts`
+instead. Plain JavaScript files work on any version.
 
 Async functions work too. Return a promise and each run gets awaited.
 
@@ -148,46 +150,134 @@ the average, so one unlucky garbage collection pause can't skew the result. It
 also warms up the CPU before the first measurement, because code always runs
 slower on a cold start and that alone can look like a fake regression.
 
-## Running it in CI
+## It tells you when your benchmark is lying
+
+A false alarm is annoying. A benchmark that silently measures nothing is worse,
+because it prints a confident green "ok" forever while production gets slower.
+
+That happens more than you'd think. Say you write this:
+
+```ts
+bench("does nothing useful", () => 1 + 1);
+```
+
+The JavaScript engine is smart. It notices the result is never used and can skip
+the work entirely, so you end up timing an empty loop. benchguard catches it:
+
+```
+measuring does nothing useful ... 0.8 ns/op  ±1.2%
+    ! 0.77ns per op is suspiciously close to zero: the body may have been
+      optimized away. Make the benchmark return a value that depends on the work.
+```
+
+It checks every measurement and warns you when:
+
+- **the numbers are too noisy** to see a real regression (wobble over 10%)
+- **too few samples** came back to trust the median
+- **the time is near zero**, which usually means the work got optimized away
+- **the function is too fast to time** on its own, so you should benchmark a
+  bigger piece of work
+
+Warnings never fail your build. They just tell you when the green checkmark
+isn't earned.
+
+One thing benchguard does for you automatically: it holds on to whatever your
+function returns, so the engine can't decide your result is unused and delete
+the call. That protects real work. It can't invent work that isn't there, though,
+which is why `1 + 1` still gets flagged. The fix is always the same: benchmark
+something real and return its result.
+
+## Running it in CI (the right way)
+
+Here's a trap. You record a baseline on your laptop, commit it, and CI compares
+against it. But CI runs on a completely different computer. Different CPU,
+different speed, other jobs running beside yours. Your laptop said 198 µs, the CI
+machine says 217 µs, and nothing in your code changed. You're comparing two
+computers, not two versions of your code.
+
+The fix is simple: **don't compare against a number from somewhere else. Measure
+both versions on the same machine, one right after the other.**
+
+```mermaid
+flowchart LR
+    A[CI machine starts] --> B[Check out main<br/>and measure it]
+    B --> C[Check out your PR<br/>and measure it]
+    C --> D{Your PR slower<br/>than main?}
+    D -->|no| E([pass])
+    D -->|yes| F([fail])
+```
+
+Same CPU, same minute, same everything. The only thing that changed between the
+two numbers is your code, which is exactly what you want to measure.
+
+Copy this into `.github/workflows/perf.yml`:
 
 ```yaml
-# .github/workflows/perf.yml
 name: perf
 on: [pull_request]
+
 jobs:
   bench:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # we need main's history too
+
       - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - run: npm ci
-      - run: npx tsx bench/orders.bench.ts
+        with:
+          node-version: 22
+
+      - name: Measure main
+        run: |
+          git checkout --detach ${{ github.event.pull_request.base.sha }}
+          npm ci
+          node bench/orders.bench.ts --update --baseline "$RUNNER_TEMP/baseline.json"
+
+      - name: Measure this PR and compare
+        run: |
+          git checkout --detach ${{ github.event.pull_request.head.sha }}
+          npm ci
+          node bench/orders.bench.ts --baseline "$RUNNER_TEMP/baseline.json" --threshold 0.25
 ```
 
-When a change is *supposed* to affect performance, update the baseline on purpose
-and commit it, exactly like updating a snapshot:
+A few details that matter:
 
-```bash
-npx tsx bench/orders.bench.ts --update
-```
+- `--baseline "$RUNNER_TEMP/baseline.json"` saves the number **outside** your
+  project folder. That way switching branches with `git checkout` can't overwrite
+  it.
+- `--baseline` and `--threshold` override whatever is written in your bench file,
+  so the same file works on your laptop and in CI without editing it.
+- `--threshold 0.25` is deliberately relaxed. Shared CI machines are noisy, and
+  the regressions worth catching are 30x, not 3%. A guard that never cries wolf
+  is a guard your team keeps turned on.
+- Nothing to commit. No baseline file goes stale in your repo.
+
+This repo runs exactly this workflow on itself. See
+[`.github/workflows/perf.yml`](.github/workflows/perf.yml).
+
+### Or keep it simple and commit a baseline
+
+If you don't use CI, or you're benchmarking on the same machine every time,
+committing the baseline file is fine. Record once with `--update`, commit
+`benchguard.baseline.json`, and run without the flag after that. When a change is
+*supposed* to affect speed, re-record and commit it, like updating a snapshot.
 
 ## Things you should know
 
 Benchmarks have some wobble that no trick fully removes, so a little care pays off:
 
-- **Record the baseline on the same kind of machine that checks it.** A number
-  from your laptop compared against a CI runner is comparing two different
-  computers, and you'll chase ghosts.
+- **Never compare numbers from two different machines.** Use the CI recipe above,
+  which measures both versions on one machine. A laptop number against a CI
+  number will send you chasing ghosts.
 - **Pick a threshold that fits where it runs.** 10% is fine on a quiet machine.
-  Shared CI runners are noisier, so 15% to 20% is more realistic. Set it loose
+  Shared CI runners are noisier, so 20% to 25% is more realistic. Set it loose
   enough that it never fake-fails you, since the regressions worth catching are
   usually huge, not 3%.
 - **Benchmark with realistic data sizes.** The example above only shows a problem
   because it uses 5,000 orders. At 10 orders, the slow version looks fine.
-- benchguard measures inside one process. Running each benchmark in a separate
-  process would remove even more variance, and that's planned, but it isn't here
-  yet.
+- **Read the warnings.** If benchguard says a result is noisy or near zero, the
+  green checkmark on that benchmark means nothing yet. Fix the benchmark first.
 
 ## A full working example
 
@@ -215,9 +305,24 @@ run(opts?: RunOptions): Promise<Comparison[] | undefined>
 
 // if you just want the numbers and no baseline machinery:
 measure(fn, opts?): Promise<Stats>
+trustWarnings(stats): string[]   // same checks run() prints, as a list
 ```
 
-**`RunOptions`**
+**Command line flags**
+
+These work on any bench file and override what's written inside it.
+
+| flag              | env var                | what it does                          |
+| ----------------- | ---------------------- | ------------------------------------- |
+| `--update`        |                        | record a new baseline instead of checking |
+| `--baseline path` | `BENCHGUARD_BASELINE`  | where to read or write the baseline   |
+| `--threshold n`   | `BENCHGUARD_THRESHOLD` | how much slower before it fails, e.g. `0.25` |
+
+A flag beats an env var, and an env var beats the value in your file. A
+threshold that isn't a real number stops the run with an error instead of
+quietly letting everything pass.
+
+**`RunOptions`** (set inside your bench file)
 
 | option           | default                    | what it does                             |
 | ---------------- | -------------------------- | ---------------------------------------- |

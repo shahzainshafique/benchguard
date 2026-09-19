@@ -217,7 +217,7 @@ export interface Comparison {
 /**
  * Compare one current measurement against its baseline.
  * A regression is flagged only when the slowdown clears BOTH the threshold
- * AND the combined measurement noise — this is what stops flaky CI failures.
+ * AND the combined measurement noise. This is what stops flaky CI failures.
  */
 export function compareOne(
   name: string,
@@ -245,7 +245,7 @@ export interface RunOptions extends MeasureOptions {
   update?: boolean;
   /**
    * CPU busy-spin before the first measurement (ms). Ramps CPU turbo/frequency
-   * so the first benchmark isn't penalized by cold-start — the single biggest
+   * so the first benchmark isn't penalized by cold-start, the single biggest
    * source of phantom regressions between --update and compare. Default 300.
    */
   globalWarmupMs?: number;
@@ -282,14 +282,14 @@ function printTable(rows: Comparison[]): void {
   console.log("-".repeat(head.length));
   for (const r of rows) {
     const delta =
-      r.delta === null ? "—" : `${r.delta >= 0 ? "+" : ""}${(r.delta * 100).toFixed(1)}%`;
+      r.delta === null ? "-" : `${r.delta >= 0 ? "+" : ""}${(r.delta * 100).toFixed(1)}%`;
     const mark =
       r.status === "regressed" ? "✗ SLOWER" :
       r.status === "improved" ? "✓ faster" :
       r.status === "new" ? "＋ new" : "ok";
     console.log(
       pad(r.name, cols.name) + "  " +
-      pad(r.baseline === null ? "—" : formatTime(r.baseline), cols.base) + "  " +
+      pad(r.baseline === null ? "-" : formatTime(r.baseline), cols.base) + "  " +
       pad(formatTime(r.current), cols.cur) + "  " +
       pad(delta, cols.delta) + "  " + mark,
     );

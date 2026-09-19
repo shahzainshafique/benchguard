@@ -29,7 +29,7 @@ test("computeStats: unsorted input is handled", () => {
   assert.equal(s.min, 10);
 });
 
-// compareOne decision logic — build Stats directly so we control the noise.
+// compareOne decision logic: build Stats directly so we control the noise.
 const mk = (median: number, rme: number): Stats => ({
   median, mean: median, min: median, stddev: 0, moe: 0, rme, samples: 10, batch: 1,
 });

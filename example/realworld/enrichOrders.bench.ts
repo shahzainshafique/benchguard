@@ -11,7 +11,7 @@ import { bench, run } from "../../src/index.ts";
 import { enrichOrders, type Customer, type Order } from "./enrichOrders.ts";
 
 // A fixture sized like a real page of data, not a toy. Benchmarks should use
-// volumes close to production — an O(n²) bug is invisible at n=10.
+// volumes close to production. An O(n²) bug is invisible at n=10.
 const customers: Customer[] = Array.from({ length: 1_000 }, (_, i) => ({
   id: `cust_${i}`,
   name: `Customer ${i}`,

@@ -48,7 +48,7 @@ explain(compareOne("sort", base, afterChange, 0.1));
 console.log("\n────────────────────────────────────────────────────────────");
 console.log("Now the part that makes benchguard trustworthy: run the SAME");
 console.log("unchanged code and compare it to the baseline. Timings never");
-console.log("match exactly — the gate must NOT cry wolf over that wobble.\n");
+console.log("match exactly, and the gate must NOT cry wolf over that wobble.\n");
 
 const rerun = await measure(unchanged, { timeBudgetMs: 300 });
 console.log("STEP 4 ── Compare identical code against the baseline:");

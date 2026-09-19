@@ -1,7 +1,7 @@
 {
   "name": "benchguard",
   "version": "0.1.1",
-  "description": "Catch performance regressions in CI. Run benchmarks, save a baseline, fail when your code gets slower — without flaking on measurement noise.",
+  "description": "Catch performance regressions in CI. Fails the build when a change makes your code meaningfully slower, without flaking on measurement noise.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
