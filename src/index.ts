@@ -52,6 +52,9 @@ export function reset(): void {
   registry.length = 0;
 }
 
+/** Ceiling on operations per timed batch. Hitting it means the fn is too fast to time. */
+const MAX_BATCH = 1e8;
+
 // Assigned inside the hot loop so V8 can't dead-code-eliminate the benchmark body.
 let _sink: unknown;
 
@@ -113,11 +116,11 @@ export async function measure(fn: BenchFn, opts: MeasureOptions = {}): Promise<S
 
   // Calibrate batch size so each timed batch takes at least minBatchNs.
   let batch = 1;
-  while (batch < 1e8) {
+  while (batch < MAX_BATCH) {
     const t = await timeBatch(fn, batch, isAsync);
     if (t >= minBatchNs) break;
     const grow = Math.ceil((batch * minBatchNs) / Math.max(t, 1));
-    batch = Math.min(1e8, Math.max(batch * 2, grow));
+    batch = Math.min(MAX_BATCH, Math.max(batch * 2, grow));
   }
 
   // Collect samples until we hit minSamples and the time budget (or maxSamples).
@@ -133,6 +136,67 @@ export async function measure(fn: BenchFn, opts: MeasureOptions = {}): Promise<S
   }
 
   return computeStats(perOp, batch);
+}
+
+/**
+ * Sanity-check a measurement and report anything that makes it untrustworthy.
+ * A benchmark that quietly measures nothing is worse than no benchmark at all:
+ * it reports a confident "ok" forever while production gets slower.
+ */
+export function trustWarnings(s: Stats): string[] {
+  const w: string[] = [];
+  if (s.rme > 10) {
+    w.push(
+      `very noisy (±${s.rme.toFixed(1)}%): any regression smaller than that is invisible. ` +
+        `Raise timeBudgetMs, or close whatever else is running.`,
+    );
+  }
+  if (s.samples < 10) {
+    w.push(
+      `only ${s.samples} sample(s) collected: the median is shaky. Raise timeBudgetMs.`,
+    );
+  }
+  if (s.median < 1) {
+    w.push(
+      `${s.median.toFixed(2)}ns per op is suspiciously close to zero: the body may have been ` +
+        `optimized away. Make the benchmark return a value that depends on the work.`,
+    );
+  }
+  if (s.batch >= MAX_BATCH) {
+    w.push(
+      `batch size hit its ceiling: this function is too fast to time on its own. ` +
+        `Benchmark a bigger unit of work.`,
+    );
+  }
+  return w;
+}
+
+/** Read `--flag value` or `--flag=value` from argv. Returns undefined if absent. */
+export function argValue(flag: string, argv: string[] = process.argv): string | undefined {
+  const i = argv.indexOf(flag);
+  if (i !== -1) {
+    const next = argv[i + 1];
+    // Guard against `--baseline --update` swallowing the next flag as a value.
+    if (next !== undefined && !next.startsWith("--")) return next;
+  }
+  const eq = argv.find((a) => a.startsWith(`${flag}=`));
+  return eq ? eq.slice(flag.length + 1) : undefined;
+}
+
+/**
+ * Parse a threshold, rejecting junk. A NaN threshold would silently disable the
+ * guard entirely (every comparison against NaN is false), so bad input must throw
+ * rather than quietly pass every build.
+ */
+export function parseThreshold(raw: string | undefined, fallback: number): number {
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    throw new Error(
+      `benchguard: invalid threshold ${JSON.stringify(raw)}. Expected a number >= 0, e.g. 0.15 for 15%.`,
+    );
+  }
+  return n;
 }
 
 export type Status = "ok" | "regressed" | "improved" | "new";
@@ -237,8 +301,17 @@ function printTable(rows: Comparison[]): void {
  * non-zero exit code on regression, or writes the baseline when update is set.
  */
 export async function run(opts: RunOptions = {}): Promise<Comparison[] | undefined> {
-  const path = opts.baseline ?? "benchguard.baseline.json";
-  const threshold = opts.threshold ?? 0.1;
+  // CLI flag beats env var beats the value hardcoded in the script. This is what
+  // lets one benchmark file serve both local runs and CI without being edited.
+  const path =
+    argValue("--baseline") ??
+    process.env.BENCHGUARD_BASELINE ??
+    opts.baseline ??
+    "benchguard.baseline.json";
+  const threshold = parseThreshold(
+    argValue("--threshold") ?? process.env.BENCHGUARD_THRESHOLD,
+    opts.threshold ?? 0.1,
+  );
   const update = opts.update ?? process.argv.includes("--update");
 
   if (registry.length === 0) {
@@ -264,6 +337,7 @@ export async function run(opts: RunOptions = {}): Promise<Comparison[] | undefin
     const s = await measure(b.fn, opts);
     current[b.name] = s;
     console.log(`${formatTime(s.median)}/op  ±${s.rme.toFixed(1)}%`);
+    for (const w of trustWarnings(s)) console.log(`      ! ${w}`);
   }
 
   if (update) {

@@ -1,0 +1,40 @@
+name: perf
+
+on: [pull_request]
+
+# Measure the base branch and this PR on the SAME runner, in the same job, minutes
+# apart. That removes the machine-to-machine variance you get from committing a
+# baseline recorded on someone's laptop. Both numbers come from this one CPU.
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need the base branch's history too, not just this commit
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Record the baseline from the base branch
+        run: |
+          git checkout --detach ${{ github.event.pull_request.base.sha }}
+          npm ci
+          node example/realworld/enrichOrders.bench.ts \
+            --update --baseline "$RUNNER_TEMP/baseline.json"
+
+      - name: Measure this PR against it
+        run: |
+          git checkout --detach ${{ github.event.pull_request.head.sha }}
+          npm ci
+          node example/realworld/enrichOrders.bench.ts \
+            --baseline "$RUNNER_TEMP/baseline.json" --threshold 0.25
+
+# The baseline lives in $RUNNER_TEMP, outside the working tree, so `git checkout`
+# between the two steps can't touch it.
+#
+# threshold 0.25 is deliberately loose: shared CI runners have noisy neighbours,
+# and the regressions worth catching are 30x, not 3%. A guard that never fake-fails
+# is a guard people keep.
