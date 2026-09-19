@@ -28,7 +28,7 @@ const orders: Order[] = Array.from({ length: 5_000 }, (_, i) => ({
   })),
 }));
 
-bench("enrichOrders — 5k orders × 1k customers", () =>
+bench("enrichOrders (5k orders x 1k customers)", () =>
   enrichOrders(orders, customers),
 );
 

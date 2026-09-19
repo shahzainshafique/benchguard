@@ -6,28 +6,63 @@
 [![types](https://img.shields.io/badge/types-included-blue.svg)](src/index.ts)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Performance regressions don't announce themselves. A refactor lands, the tests
-stay green, the PR merges. Three weeks later someone notices a hot path got 40%
-slower — and now you're bisecting two hundred commits to find where.
+### Your tests check if the code is *correct*. Nothing checks if it's still *fast*.
 
-**benchguard turns "wait, is this slower?" into a check that fails like any
-broken test.** You record a baseline once, commit it, and every run after that
-compares against it. If your code got slower, the build goes red.
+Here's a real two line change. It deletes a line and honestly looks cleaner:
 
-The catch with benchmarking is noise: run the same code twice and you'll get
-two different numbers. A guard that flags that noise as a regression gets muted
-by Tuesday. benchguard's whole job is to fail **only** when a slowdown is real —
-bigger than your threshold *and* bigger than the measurement noise.
+```diff
+- const byId = new Map(customers.map(c => [c.id, c]));
+- const customer = byId.get(order.customerId);
++ const customer = customers.find(c => c.id === order.customerId);
+```
+
+Every test passes. The output is byte for byte identical. TypeScript is happy,
+the linter is happy, your reviewer hits Approve.
+
+It's also **31x slower.**
+
+The first version puts customers in a Map, so each lookup is instant. The second
+one re-scans the entire customer list for every single order. With 5,000 orders
+and 1,000 customers that's 5 million comparisons on every request. Your laptop
+won't notice with test data. Production will.
+
+Nothing in a normal CI pipeline catches this. benchguard does:
 
 ```
-name             baseline      current       delta      status
---------------------------------------------------------------
-parseConfig      131.20 µs     405.53 µs     +209.1%    ✗ SLOWER
-serialize        125.37 µs     124.10 µs     -1.0%      ok
-tokenize          98.08 µs      96.40 µs     -1.7%      ok
+name                                     baseline      current       delta      status
+--------------------------------------------------------------------------------------
+enrichOrders (5k orders x 1k customers)  198.38 µs     6.23 ms       +3042.8%   ✗ SLOWER
 
-✗ 1 regression(s) over 10% threshold      → exit 1, CI fails
+✗ 1 regression(s) over 15% threshold
 ```
+
+Build goes red. Same as a failing test. You find out in the PR, not from a
+3am alert three weeks later.
+
+## The idea in one line
+
+You already write tests like *"does `placeOrder()` return the right total?"*
+That's a yes or no question about correctness.
+
+benchguard answers a different question: *"is `placeOrder()` still as fast as it
+was last week?"* It's measured in real microseconds, not guesswork.
+
+You record how fast your code is today and commit that number. After that, every
+PR gets measured against it. If someone makes it meaningfully slower, the build
+fails.
+
+```mermaid
+flowchart LR
+    A[Write a benchmark<br/>for a hot function] --> B[Record how fast<br/>it is today]
+    B --> C[Commit that<br/>number to git]
+    C --> D[Every PR gets<br/>measured against it]
+    D --> E{Slower?}
+    E -->|"no, or just noise"| F([build passes])
+    E -->|"yes, really slower"| G([build fails])
+```
+
+Think of the recorded number like a snapshot test. A snapshot test saves what
+your output *looked* like. This saves how fast it *ran*.
 
 ## Install
 
@@ -35,65 +70,85 @@ tokenize          98.08 µs      96.40 µs     -1.7%      ok
 npm install --save-dev benchguard
 ```
 
-Zero dependencies. Ships with TypeScript types. Works on Node 18+, and in Deno
-and Bun.
+No dependencies. TypeScript types included. Works on Node 18+, Bun and Deno.
 
-## How it fits together
+## Getting started
 
-```mermaid
-flowchart LR
-    A[Write<br/>benchmarks] --> B[Run with --update<br/>saves baseline.json]
-    B --> C[Commit the<br/>baseline]
-    C --> D[CI runs it<br/>on every PR]
-    D --> E{Slower than<br/>baseline?}
-    E -->|within noise| F([✓ pass])
-    E -->|real regression| G([✗ fail build])
-```
-
-Think of the baseline like a test snapshot: you commit it, it guards every PR,
-and you update it on purpose when a change is *meant* to move performance.
-
-## Quick start
-
-A benchmark file is just a script you run — no config, no test runner, no CLI to
-learn. Register benchmarks with `bench()`, then call `run()`.
-
-**TypeScript** (`bench/sort.bench.ts`, run with [`tsx`](https://tsx.is)):
+**Step 1.** Write a benchmark file. It's a normal script, not a special test
+format. Pick a function that runs a lot, feed it realistic data, and call `run()`.
 
 ```ts
+// bench/orders.bench.ts
 import { bench, run } from "benchguard";
+import { enrichOrders } from "../src/orders.js";
 
-const data = Array.from({ length: 1000 }, () => Math.random());
+// Use production-sized data. An O(n²) bug is invisible with 10 rows.
+const customers = makeCustomers(1000);
+const orders = makeOrders(5000);
 
-bench("spread + sort", () => [...data].sort((a, b) => a - b));
-bench("slice + sort", () => data.slice().sort((a, b) => a - b));
+bench("enrichOrders", () => enrichOrders(orders, customers));
 
-await run({ threshold: 0.1 }); // fail if >10% slower than baseline
+await run({ threshold: 0.15 }); // fail if it gets 15% slower
 ```
 
-**Plain JavaScript** — same thing, no build step (`bench/sort.bench.mjs`):
-
-```js
-import { bench, run } from "benchguard";
-
-bench("regex match", () => /\d{3}-\d{4}/.test("555-1234"));
-
-await run();
-```
-
-Then, two commands — one to lock in the baseline, one to check against it:
+**Step 2.** Record the baseline once, and commit the file it writes.
 
 ```bash
-node bench/sort.bench.mjs --update   # 1. record baseline (commit this file)
-node bench/sort.bench.mjs            # 2. compare — exits 1 if slower
+npx tsx bench/orders.bench.ts --update
 ```
 
-Async benchmarks just work — return a promise and it's awaited each iteration.
+```
+measuring enrichOrders ... 198.38 µs/op  ±2.5%
+Baseline written to benchguard.baseline.json (1 benchmarks)
+```
 
-## Wire it into CI
+**Step 3.** Run it without the flag to check against that baseline. This is the
+command CI runs.
 
-The compare command exits non-zero on a regression, so any CI provider fails the
-job automatically. No plugin, no reporter.
+```bash
+npx tsx bench/orders.bench.ts
+```
+
+It exits with code 1 if the code got slower, so any CI provider fails the job on
+its own. No plugin, no reporter, no config file.
+
+Async functions work too. Return a promise and each run gets awaited.
+
+## Why it won't spam you with false alarms
+
+This is the part that decides whether a tool like this is useful or annoying.
+
+Timing code is noisy. Run the exact same function twice and you get two slightly
+different numbers, because your CPU changes clock speed, the garbage collector
+fires, some other process wakes up. If a tool failed your build every time a
+number wobbled by 4%, you'd mute it within a week and it would be worthless.
+
+So benchguard asks **two** questions before it fails anything, not one:
+
+1. Is it slower than the threshold you set? (default 10%)
+2. Is the slowdown bigger than the wobble it just measured?
+
+Both have to be yes.
+
+```mermaid
+flowchart TD
+    M[Measure the code now] --> D[Compare to baseline]
+    D --> T{"Slower than your threshold?"}
+    T -->|no| OK1([pass])
+    T -->|yes| N{"Bigger than the noise?"}
+    N -->|no| OK2([pass: too noisy to trust])
+    N -->|yes| R([fail: real regression])
+```
+
+A 3% slowdown on a machine that wobbles 4% is not a regression, it's static, and
+benchguard stays quiet about it. A 3042% slowdown clears both bars instantly.
+
+Under the hood it takes hundreds of samples and reports the **median** instead of
+the average, so one unlucky garbage collection pause can't skew the result. It
+also warms up the CPU before the first measurement, because code always runs
+slower on a cold start and that alone can look like a fake regression.
+
+## Running it in CI
 
 ```yaml
 # .github/workflows/perf.yml
@@ -107,48 +162,50 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
       - run: npm ci
-      - run: npx tsx bench/sort.bench.ts   # non-zero exit fails the PR
+      - run: npx tsx bench/orders.bench.ts
 ```
 
-## Why it doesn't flake
+When a change is *supposed* to affect performance, update the baseline on purpose
+and commit it, exactly like updating a snapshot:
 
-Most of the code exists to earn one thing: your trust that a red build means a
-real slowdown. Four things get you there.
-
-```mermaid
-flowchart TD
-    M[Measure current run] --> D[delta = change vs baseline]
-    D --> T{delta &gt; threshold?}
-    T -->|no| OK1([ok])
-    T -->|yes| N{delta &gt; measurement noise?}
-    N -->|no| OK2([ok — change is<br/>inside the noise band])
-    N -->|yes| R([regressed → exit 1])
+```bash
+npx tsx bench/orders.bench.ts --update
 ```
 
-- **Median, not mean** — one GC pause or a scheduler hiccup won't move the number
-  it reports.
-- **Auto-calibrated batches** — each timed batch runs long enough (≥1 ms) that
-  timer resolution stops mattering.
-- **Warm-up spin** — the CPU is ramped to a steady clock before the first
-  measurement, so a cold start doesn't masquerade as a regression between
-  `--update` and compare.
-- **Noise-aware gate** — the diagram above. A slowdown has to clear both your
-  threshold and the combined margin of error of the two runs before it's called
-  a regression.
+## Things you should know
 
-## The honest part
+Benchmarks have some wobble that no trick fully removes, so a little care pays off:
 
-Microbenchmarks carry run-to-run variance that no in-process trick fully
-removes — CPU turbo, thermal throttling, a noisy CI neighbour. So:
+- **Record the baseline on the same kind of machine that checks it.** A number
+  from your laptop compared against a CI runner is comparing two different
+  computers, and you'll chase ghosts.
+- **Pick a threshold that fits where it runs.** 10% is fine on a quiet machine.
+  Shared CI runners are noisier, so 15% to 20% is more realistic. Set it loose
+  enough that it never fake-fails you, since the regressions worth catching are
+  usually huge, not 3%.
+- **Benchmark with realistic data sizes.** The example above only shows a problem
+  because it uses 5,000 orders. At 10 orders, the slow version looks fine.
+- benchguard measures inside one process. Running each benchmark in a separate
+  process would remove even more variance, and that's planned, but it isn't here
+  yet.
 
-- **Record the baseline on the same kind of machine you compare on.** A baseline
-  from your laptop measured against a CI runner is comparing two different
-  worlds.
-- **Tune `threshold` to your environment.** 10% suits a quiet machine; shared CI
-  may want 15–20%.
-- benchguard measures within a single process. Defeating steady-state drift
-  entirely means running each benchmark in its own process and aggregating —
-  that's on the roadmap, not here yet.
+## A full working example
+
+The repo has the complete story you saw at the top, ready to run:
+
+- [`example/realworld/enrichOrders.ts`](example/realworld/enrichOrders.ts) is the
+  service function, the kind of thing a `GET /orders` handler calls.
+- [`example/realworld/enrichOrders.bench.ts`](example/realworld/enrichOrders.bench.ts)
+  is the guard around it.
+
+```bash
+git clone https://github.com/shahzainshafique/benchguard
+cd benchguard && npm install
+npm run demo
+```
+
+Then go swap the `Map` lookup in `enrichOrders.ts` for `customers.find(...)` and
+run it again. Watch it catch you.
 
 ## API
 
@@ -156,22 +213,20 @@ removes — CPU turbo, thermal throttling, a noisy CI neighbour. So:
 bench(name: string, fn: () => unknown | Promise<unknown>): void
 run(opts?: RunOptions): Promise<Comparison[] | undefined>
 
-// lower-level, if you want the numbers without the baseline machinery:
+// if you just want the numbers and no baseline machinery:
 measure(fn, opts?): Promise<Stats>
-computeStats(perOp: number[], batch: number): Stats
-compareOne(name, baseline, current, threshold): Comparison
 ```
 
 **`RunOptions`**
 
-| option           | default                     | what it does                                  |
-| ---------------- | --------------------------- | --------------------------------------------- |
-| `threshold`      | `0.1`                       | fail when this much slower (fraction)         |
-| `baseline`       | `benchguard.baseline.json`  | path to the baseline file                     |
-| `update`         | `--update` in argv          | write the baseline instead of comparing       |
-| `timeBudgetMs`   | `500`                       | sampling time per benchmark                   |
-| `globalWarmupMs` | `300`                       | CPU warm-up spin before the first measurement |
-| `minSamples`     | `10`                        | minimum sample batches collected              |
+| option           | default                    | what it does                             |
+| ---------------- | -------------------------- | ---------------------------------------- |
+| `threshold`      | `0.1`                      | how much slower before it fails          |
+| `baseline`       | `benchguard.baseline.json` | where the recorded number lives          |
+| `update`         | `--update` in argv         | record a new baseline instead of checking |
+| `timeBudgetMs`   | `500`                      | how long to sample each benchmark        |
+| `globalWarmupMs` | `300`                      | CPU warm up before the first measurement |
+| `minSamples`     | `10`                       | fewest samples to collect                |
 
 ## License
 
