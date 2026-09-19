@@ -24,6 +24,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "demo": "tsx example/walkthrough.ts",
     "test": "tsx src/index.test.ts",
     "prepublishOnly": "npm run build"
   },
