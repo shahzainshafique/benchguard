@@ -62,59 +62,76 @@ flowchart LR
 Think of the recorded number like a snapshot test. A snapshot test saves what
 your output *looked* like. This saves how fast it *ran*.
 
-## Install
+## Try it in a minute
 
 ```bash
 npm install --save-dev benchguard
+npx benchguard init
 ```
 
-No dependencies. TypeScript types included. Works on Node 18+, Bun and Deno.
+```
+  create  bench/example.bench.mjs
+  create  .github/workflows/benchguard.yml
+```
 
-## Getting started
+That gives you a working starter benchmark and a CI workflow. Record how fast
+the starter is, then check it:
 
-**Step 1.** Write a benchmark file. It's a normal script, not a special test
-format. Pick a function that runs a lot, feed it realistic data, and call `run()`.
+```bash
+npx benchguard --update    # record how fast it is right now
+npx benchguard             # check again, it passes
+```
 
-```ts
-// bench/orders.bench.ts
+Now break it on purpose. Open `bench/example.bench.mjs` and do what the comment
+says: swap the `Map` lookup for `.find()`. Run the check again:
+
+```
+name                 baseline      current       delta      status
+------------------------------------------------------------------
+find 2k users by id  116.77 µs     954.80 µs     +717.7%    ✗ SLOWER
+
+✗ 1 regression(s) over 10% threshold
+  If this slowdown is on purpose, re-record the baseline with --update.
+```
+
+It exits with code 1, so CI fails the build on its own. No plugin, no config
+file, and benchguard has zero dependencies of its own.
+
+## Benchmark your own code
+
+Swap the starter for a function your app actually runs a lot. A bench file is a
+plain script, not a special test format:
+
+```js
+// bench/orders.bench.mjs
 import { bench, run } from "benchguard";
 import { enrichOrders } from "../src/orders.js";
+import { makeCustomers, makeOrders } from "./fixtures.mjs"; // your own test data
 
-// Use production-sized data. An O(n²) bug is invisible with 10 rows.
+// Production-sized data. An O(n²) bug is invisible with 10 rows.
 const customers = makeCustomers(1000);
 const orders = makeOrders(5000);
 
 bench("enrichOrders", () => enrichOrders(orders, customers));
 
-await run({ threshold: 0.15 }); // fail if it gets 15% slower
+await run();
 ```
 
-**Step 2.** Record how fast it is right now.
+A few rules that save you a headache:
 
-```bash
-node bench/orders.bench.ts --update
-```
+- **Put bench files in `bench/` and end the name with `.bench.mjs`** (or
+  `.bench.mts` for TypeScript). `npx benchguard` finds and runs all of them.
+- **Use `.mjs`, not `.js`.** A `.js` file with `import` crashes in any project
+  that hasn't set `"type": "module"`, and `npm init` doesn't set it. `.mjs` works
+  everywhere. Same for TypeScript: use `.mts`.
+- **Return the result** of the work you're timing, so the JavaScript engine can't
+  skip it.
+- **Async works.** Return a promise and every run gets awaited.
+- **Several bench files are fine.** They share one baseline file and each keeps
+  its own numbers.
 
-```
-measuring enrichOrders ... 198.38 µs/op  ±2.5%
-Baseline written to benchguard.baseline.json (1 benchmarks)
-```
-
-**Step 3.** Change some code, then run it again without the flag. It compares
-against what you just recorded.
-
-```bash
-node bench/orders.bench.ts
-```
-
-It exits with code 1 if the code got slower, so any CI provider fails the job on
-its own. No plugin, no reporter, no config file.
-
-Yes, that's plain `node` running a `.ts` file. Node 22.18+ runs TypeScript
-directly, no build step. On an older Node, use `npx tsx bench/orders.bench.ts`
-instead. Plain JavaScript files work on any version.
-
-Async functions work too. Return a promise and each run gets awaited.
+TypeScript bench files run directly on Node 22.18 and newer. On older Node, run
+them with `npx tsx bench/orders.bench.mts`.
 
 ## Why it won't spam you with false alarms
 
@@ -210,58 +227,50 @@ flowchart LR
 Same CPU, same minute, same everything. The only thing that changed between the
 two numbers is your code, which is exactly what you want to measure.
 
-Copy this into `.github/workflows/perf.yml`:
+You don't have to write any of this. `npx benchguard init` already created
+`.github/workflows/benchguard.yml`, which does exactly that. Commit it, open a
+PR, and you're done.
 
-```yaml
-name: perf
-on: [pull_request]
+When a PR makes something slower, the check fails and this shows up on the
+run's summary page, right where people look:
 
-jobs:
-  bench:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # we need main's history too
+> ### 🔴 benchguard: bench/example.bench.mjs
+>
+> **1 benchmark(s) got more than 25% slower.**
+>
+> | benchmark | before | after | change | result |
+> | --- | ---: | ---: | ---: | --- |
+> | find 2k users by id | 138.80 µs | 993.45 µs | +615.7% | 🔴 slower |
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
+What the workflow takes care of for you:
 
-      - name: Measure main
-        run: |
-          git checkout --detach ${{ github.event.pull_request.base.sha }}
-          npm ci
-          node bench/orders.bench.ts --update --baseline "$RUNNER_TEMP/baseline.json"
+- **Your first PR doesn't fail.** The PR that adds benchguard has nothing to
+  compare against yet, so it passes with a "benchguard is set up" note. It
+  starts guarding from the next PR on.
+- **New bench files need no workflow edits.** It runs everything in `bench/`.
+- **The threshold is 25% in CI.** Shared CI machines are noisy, and the
+  regressions worth catching are 30x, not 3%. A guard that never cries wolf is a
+  guard your team keeps turned on. Change `--threshold` in the workflow if you
+  want it stricter.
+- **Slowing something down on purpose?** Merge anyway. The next PR gets compared
+  against the new `main`.
+- **Nothing gets committed.** The baseline is measured fresh from `main` on every
+  run and thrown away after.
 
-      - name: Measure this PR and compare
-        run: |
-          git checkout --detach ${{ github.event.pull_request.head.sha }}
-          npm ci
-          node bench/orders.bench.ts --baseline "$RUNNER_TEMP/baseline.json" --threshold 0.25
-```
-
-A few details that matter:
-
-- `--baseline "$RUNNER_TEMP/baseline.json"` saves the number **outside** your
-  project folder. That way switching branches with `git checkout` can't overwrite
-  it.
-- `--baseline` and `--threshold` override whatever is written in your bench file,
-  so the same file works on your laptop and in CI without editing it.
-- `--threshold 0.25` is deliberately relaxed. Shared CI machines are noisy, and
-  the regressions worth catching are 30x, not 3%. A guard that never cries wolf
-  is a guard your team keeps turned on.
-- Nothing to commit. No baseline file goes stale in your repo.
-
-This repo runs exactly this workflow on itself. See
-[`.github/workflows/perf.yml`](.github/workflows/perf.yml).
+The generated workflow uses `npm ci`. If you use pnpm or yarn, change the two
+`npm ci` lines to your install command.
 
 ### Or keep it simple and commit a baseline
 
-If you don't use CI, or you're benchmarking on the same machine every time,
-committing the baseline file is fine. Record once with `--update`, commit
+Without CI, you can record once with `--update`, commit
 `benchguard.baseline.json`, and run without the flag after that. When a change is
 *supposed* to affect speed, re-record and commit it, like updating a snapshot.
+
+Be warned that a committed baseline goes stale even on the same computer. This
+repo's own demo baseline drifted 15% to 30% over one month on the same laptop,
+with zero code changes, just from power settings, background apps and
+temperature. If you commit one, re-record it often. The CI workflow avoids the
+problem completely because it measures both sides fresh, minutes apart.
 
 ## Things you should know
 
@@ -291,13 +300,24 @@ The repo has the complete story you saw at the top, ready to run:
 ```bash
 git clone https://github.com/shahzainshafique/benchguard
 cd benchguard && npm install
-npm run demo
+npm run demo          # records a baseline on your machine, then checks it
 ```
 
-Then go swap the `Map` lookup in `enrichOrders.ts` for `customers.find(...)` and
-run it again. Watch it catch you.
+Then swap the `Map` lookup in `enrichOrders.ts` for `customers.find(...)` and
+run `npm run demo:check`. Watch it catch you.
 
 ## API
+
+**From the terminal**
+
+```bash
+npx benchguard init           # create a starter benchmark and a GitHub workflow
+npx benchguard                # run every *.bench.* file in ./bench
+npx benchguard <files...>     # run specific bench files
+npx benchguard --help
+```
+
+**In a bench file**
 
 ```ts
 bench(name: string, fn: () => unknown | Promise<unknown>): void
