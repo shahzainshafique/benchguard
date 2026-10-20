@@ -5,6 +5,9 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "benchguard": "dist/cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -26,7 +29,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "demo": "tsx example/realworld/enrichOrders.bench.ts",
+    "demo": "tsx example/realworld/enrichOrders.bench.ts --update && tsx example/realworld/enrichOrders.bench.ts",
+    "demo:check": "tsx example/realworld/enrichOrders.bench.ts",
     "test": "tsx src/index.test.ts",
     "prepublishOnly": "npm run build"
   },

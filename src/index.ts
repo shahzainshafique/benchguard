@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { relative } from "node:path";
 
 export interface MeasureOptions {
   /** Total time to spend sampling one benchmark (ms). Default 500. */
@@ -184,6 +185,28 @@ export function argValue(flag: string, argv: string[] = process.argv): string | 
 }
 
 /**
+ * Split CLI args into bench files and flags to pass through to each file.
+ * Flags that take a value keep it, so `--baseline out.json` never gets
+ * mistaken for a bench file named out.json.
+ */
+export function splitArgs(argv: string[]): { files: string[]; flags: string[] } {
+  const files: string[] = [];
+  const flags: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--baseline" || a === "--threshold") {
+      flags.push(a);
+      if (argv[i + 1] !== undefined) flags.push(argv[++i]);
+    } else if (a.startsWith("-")) {
+      flags.push(a);
+    } else {
+      files.push(a);
+    }
+  }
+  return { files, flags };
+}
+
+/**
  * Parse a threshold, rejecting junk. A NaN threshold would silently disable the
  * guard entirely (every comparison against NaN is false), so bad input must throw
  * rather than quietly pass every build.
@@ -268,6 +291,10 @@ function pad(s: string, n: number): string {
   return s.length >= n ? s : s + " ".repeat(n - s.length);
 }
 
+function formatDelta(r: Comparison): string {
+  return r.delta === null ? "-" : `${r.delta >= 0 ? "+" : ""}${(r.delta * 100).toFixed(1)}%`;
+}
+
 function printTable(rows: Comparison[]): void {
   const cols = {
     name: Math.max(4, ...rows.map((r) => r.name.length)),
@@ -281,8 +308,6 @@ function printTable(rows: Comparison[]): void {
   console.log("\n" + head);
   console.log("-".repeat(head.length));
   for (const r of rows) {
-    const delta =
-      r.delta === null ? "-" : `${r.delta >= 0 ? "+" : ""}${(r.delta * 100).toFixed(1)}%`;
     const mark =
       r.status === "regressed" ? "✗ SLOWER" :
       r.status === "improved" ? "✓ faster" :
@@ -291,9 +316,46 @@ function printTable(rows: Comparison[]): void {
       pad(r.name, cols.name) + "  " +
       pad(r.baseline === null ? "-" : formatTime(r.baseline), cols.base) + "  " +
       pad(formatTime(r.current), cols.cur) + "  " +
-      pad(delta, cols.delta) + "  " + mark,
+      pad(formatDelta(r), cols.delta) + "  " + mark,
     );
   }
+}
+
+/**
+ * Render results as a GitHub-flavored markdown table. In GitHub Actions this
+ * lands on the run's summary page, where people actually look, instead of
+ * being buried in a log nobody opens.
+ */
+export function summaryMarkdown(rows: Comparison[], threshold: number, title: string): string {
+  const slower = rows.filter((r) => r.status === "regressed").length;
+  const pct = (threshold * 100).toFixed(0);
+  const result = (r: Comparison) =>
+    r.status === "regressed" ? "🔴 slower" :
+    r.status === "improved" ? "🟢 faster" :
+    r.status === "new" ? "new" : "ok";
+  // A "|" in a benchmark name would split the table cell.
+  const cell = (s: string) => s.replace(/\|/g, "\\|");
+  return [
+    `### ${slower ? "🔴" : "✅"} benchguard: ${cell(title)}`,
+    "",
+    slower
+      ? `**${slower} benchmark(s) got more than ${pct}% slower.**`
+      : `Nothing got more than ${pct}% slower.`,
+    "",
+    "| benchmark | before | after | change | result |",
+    "| --- | ---: | ---: | ---: | --- |",
+    ...rows.map(
+      (r) =>
+        `| ${cell(r.name)} | ${r.baseline === null ? "-" : formatTime(r.baseline)} | ` +
+        `${formatTime(r.current)} | ${formatDelta(r)} | ${result(r)} |`,
+    ),
+    "",
+    "",
+  ].join("\n");
+}
+
+function readBaseline(path: string): Record<string, Stats> {
+  return (JSON.parse(readFileSync(path, "utf8")) as BaselineFile).benchmarks ?? {};
 }
 
 /**
@@ -341,24 +403,44 @@ export async function run(opts: RunOptions = {}): Promise<Comparison[] | undefin
   }
 
   if (update) {
-    const file: BaselineFile = {
-      version: 1,
-      createdAt: new Date().toISOString(),
-      benchmarks: current,
-    };
+    // Merge, never replace: several bench files share one baseline, and
+    // replacing it would silently drop every other file's numbers. Those
+    // benchmarks would then show up as "new" and pass no matter how slow.
+    let existing: Record<string, Stats> = {};
+    if (existsSync(path)) {
+      try {
+        existing = readBaseline(path);
+      } catch {
+        console.log(`  note: ${path} was unreadable, starting it fresh`);
+      }
+    }
+    const benchmarks = { ...existing, ...current };
+    const file: BaselineFile = { version: 1, createdAt: new Date().toISOString(), benchmarks };
     writeFileSync(path, JSON.stringify(file, null, 2) + "\n");
-    console.log(`\nBaseline written to ${path} (${registry.length} benchmarks)`);
+    console.log(
+      `\nBaseline written to ${path} ` +
+        `(${registry.length} recorded, ${Object.keys(benchmarks).length} total)`,
+    );
     return;
   }
 
   if (!existsSync(path)) {
-    console.log(`\nNo baseline at ${path}. Run with --update to create one.`);
+    if (process.env.CI) {
+      console.log(`\nNo baseline at ${path}, so there's nothing to compare against yet.`);
+      appendSummary(
+        "### ✅ benchguard is set up\n\n" +
+          "There's no baseline from the base branch yet, so nothing was compared this time. " +
+          "Once this merges, every PR gets measured against it.\n\n",
+      );
+    } else {
+      console.log(`\nNo baseline at ${path}. Run with --update to record one.`);
+    }
     return;
   }
 
   let baseline: Record<string, Stats>;
   try {
-    baseline = (JSON.parse(readFileSync(path, "utf8")) as BaselineFile).benchmarks;
+    baseline = readBaseline(path);
   } catch (e) {
     console.error(`benchguard: could not read baseline ${path}: ${(e as Error).message}`);
     process.exitCode = 1;
@@ -371,14 +453,30 @@ export async function run(opts: RunOptions = {}): Promise<Comparison[] | undefin
   printTable(comparisons);
 
   const regressed = comparisons.filter((c) => c.status === "regressed");
-  const gone = Object.keys(baseline).filter((n) => !(n in current));
-  if (gone.length) console.log(`\nnote: ${gone.length} baseline benchmark(s) no longer present: ${gone.join(", ")}`);
-
   if (regressed.length) {
     console.error(`\n✗ ${regressed.length} regression(s) over ${(threshold * 100).toFixed(0)}% threshold`);
+    console.error(
+      process.env.CI
+        ? "  If this slowdown is on purpose, merge anyway. Later PRs compare against the new base."
+        : "  If this slowdown is on purpose, re-record the baseline with --update.",
+    );
     process.exitCode = 1;
   } else {
     console.log("\n✓ no regressions");
   }
+
+  const title = relative(process.cwd(), process.argv[1] ?? "").replace(/\\/g, "/") || "benchmarks";
+  appendSummary(summaryMarkdown(comparisons, threshold, title));
   return comparisons;
+}
+
+/** Append to the GitHub Actions run summary page. A no-op outside Actions. */
+function appendSummary(markdown: string): void {
+  const file = process.env.GITHUB_STEP_SUMMARY;
+  if (!file) return;
+  try {
+    appendFileSync(file, markdown);
+  } catch (e) {
+    console.error(`  note: could not write the GitHub summary: ${(e as Error).message}`);
+  }
 }

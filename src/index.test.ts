@@ -1,12 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  bench,
+  run,
+  reset,
   computeStats,
   compareOne,
   measure,
   trustWarnings,
   argValue,
   parseThreshold,
+  splitArgs,
+  summaryMarkdown,
+  type Comparison,
   type Stats,
 } from "./index.js";
 
@@ -140,4 +149,71 @@ test("parseThreshold: rejects junk instead of silently disabling the guard", () 
   // quietly pass every build forever. It must throw.
   assert.throws(() => parseThreshold("abc", 0.1), /invalid threshold/);
   assert.throws(() => parseThreshold("-1", 0.1), /invalid threshold/);
+});
+
+// --- multiple bench files sharing one baseline ---
+
+test("run --update merges into the baseline instead of replacing it", async () => {
+  // Regression test: recording a second bench file used to wipe the first
+  // file's numbers, so its benchmarks came back as "new" and passed no matter
+  // how slow they got. Two run() calls here stand in for two bench files.
+  const path = join(mkdtempSync(join(tmpdir(), "benchguard-")), "baseline.json");
+  const fast = { baseline: path, update: true, timeBudgetMs: 20, minSamples: 3, warmupMs: 1, globalWarmupMs: 0 };
+
+  reset();
+  bench("from file A", () => Math.sqrt(2));
+  await run(fast);
+
+  reset();
+  bench("from file B", () => Math.sqrt(3));
+  await run(fast);
+  reset();
+
+  const saved = JSON.parse(readFileSync(path, "utf8")).benchmarks;
+  assert.deepEqual(Object.keys(saved).sort(), ["from file A", "from file B"]);
+});
+
+// --- CLI argument splitting ---
+
+test("splitArgs: separates bench files from flags", () => {
+  assert.deepEqual(splitArgs(["bench/a.bench.mjs", "--update", "bench/b.bench.mjs"]), {
+    files: ["bench/a.bench.mjs", "bench/b.bench.mjs"],
+    flags: ["--update"],
+  });
+});
+
+test("splitArgs: a flag's value is never mistaken for a bench file", () => {
+  assert.deepEqual(splitArgs(["--baseline", "out.json", "--threshold", "0.25"]), {
+    files: [],
+    flags: ["--baseline", "out.json", "--threshold", "0.25"],
+  });
+});
+
+// --- GitHub summary ---
+
+const row = (status: Comparison["status"], baseline: number | null, current: number): Comparison => ({
+  name: "priceCart",
+  baseline,
+  current,
+  delta: baseline === null ? null : (current - baseline) / baseline,
+  noiseFloor: 0.05,
+  status,
+});
+
+test("summaryMarkdown: a regression gets a red headline and a table row", () => {
+  const md = summaryMarkdown([row("regressed", 100_000, 1_100_000)], 0.25, "bench/cart.bench.mjs");
+  assert.match(md, /### 🔴 benchguard: bench\/cart\.bench\.mjs/);
+  assert.match(md, /1 benchmark\(s\) got more than 25% slower/);
+  assert.match(md, /\| priceCart \| 100\.00 µs \| 1\.10 ms \| \+1000\.0% \| 🔴 slower \|/);
+});
+
+test("summaryMarkdown: no regressions gets a green headline", () => {
+  const md = summaryMarkdown([row("ok", 100_000, 102_000)], 0.25, "x");
+  assert.match(md, /### ✅ benchguard/);
+  assert.match(md, /Nothing got more than 25% slower/);
+});
+
+test("summaryMarkdown: a pipe in a benchmark name can't break the table", () => {
+  const md = summaryMarkdown([{ ...row("ok", 1, 1), name: "a | b" }], 0.1, "x");
+  assert.match(md, /\| a \\| b \|/);
 });
